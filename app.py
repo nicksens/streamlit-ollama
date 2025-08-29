@@ -1,72 +1,61 @@
 import streamlit as st
-from langchain_community.llms import Ollama
+import os
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
-# --- Page Configuration ---
 st.set_page_config(
-    page_title="Local LLM Chatbot",
-    page_icon="🤖",
+    page_title="Cloud Chatbot",
     layout="wide"
 )
 
-# --- Sidebar Configuration ---
-st.sidebar.title("🤖 Local LLM Chatbot")
+def get_huggingface_token():
+    token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+    if not token:
+        try:
+            token = st.secrets["HUGGINGFACEHUB_API_TOKEN"]
+        except KeyError:
+            st.error("Hugging Face API token not found! Please set it in your Streamlit secrets.")
+            st.stop()
+    return token
+
+HUGGINGFACE_TOKEN = get_huggingface_token()
+
+st.sidebar.title("Cloud Chatbot")
 st.sidebar.markdown("Choose your model and settings.")
 
-# Model Selection
-model_name = st.sidebar.selectbox(
+model_id = st.sidebar.selectbox(
     "Choose a model",
-    ("llama3:8b", "gemma:7b")
+    ("google/gemma-2-9b-it", "mistralai/Mistral-7B-Instruct-v0.2", "meta-llama/Meta-Llama-3-8B-Instruct")
 )
 
-# Advanced Settings
-with st.sidebar.expander("⚙️ Advanced Settings"):
-    temperature = st.slider("Temperature", min_value=0.0, max_value=2.0, value=0.7, step=0.1,
-                            help="Controls randomness. Lower is more deterministic.")
-    top_p = st.slider("Top P", min_value=0.1, max_value=1.0, value=0.9, step=0.1,
-                      help="Filters vocabulary to the most probable tokens.")
-    top_k = st.number_input("Top K", min_value=1, max_value=100, value=40,
-                            help="Filters vocabulary to the top K most probable tokens.")
-    max_tokens = st.number_input("Max Tokens", min_value=64, max_value=4096, value=512,
-                                 help="Maximum number of tokens to generate.")
+with st.sidebar.expander("Advanced Settings"):
+    temperature = st.slider("Temperature", min_value=0.1, max_value=1.0, value=0.7, step=0.1)
+    top_p = st.slider("Top-P", min_value=0.1, max_value=1.0, value=0.95, step=0.05)
+    max_tokens = st.number_input("Max Tokens", min_value=64, max_value=4096, value=512)
 
-# --- Summarization Feature ---
 if st.sidebar.button("Summarize Chat"):
-    if len(st.session_state.messages) > 1:
+    if len(st.session_state.get("messages", [])) > 1:
         with st.spinner("Summarizing..."):
             conversation = "\n".join(
                 [f"{msg['role']}: {msg['content']}" for msg in st.session_state.messages]
             )
             summarization_prompt = f"Please provide a concise summary of the following conversation:\n\n{conversation}"
-            summary = Ollama(model=model_name).invoke(summarization_prompt) # Use a separate instance for summary
+
+            summarizer_endpoint = HuggingFaceEndpoint(
+                repo_id=model_id,
+                huggingface_api_token=HUGGINGFACE_TOKEN,
+                temperature=0.5,
+                max_new_tokens=150
+            )
+            llm_summarizer = ChatHuggingFace(llm=summarizer_endpoint)
+            summary_response = llm_summarizer.invoke(summarization_prompt)
+            
             st.sidebar.subheader("Chat Summary")
-            st.sidebar.info(summary)
+            st.sidebar.info(summary_response.content)
     else:
         st.sidebar.warning("Not enough conversation to summarize.")
-        
-# A button to clear the chat history
-if st.sidebar.button("Clear Chat History"):
-    st.session_state.messages = []
-    st.rerun()
 
+st.title(f"Chat with {model_id.split('/')[-1]}")
 
-# --- Model Initialization ---
-@st.cache_resource
-def get_llm(model, temp, p, k, max_tok):
-    return Ollama(
-        model=model,
-        temperature=temp,
-        top_p=p,
-        top_k=k,
-        num_predict=max_tok,
-    )
-
-llm = get_llm(model_name, temperature, top_p, top_k, max_tokens)
-
-# --- Main Chat Interface ---
-st.title(f"Chat with {model_name}")
-st.markdown("This is a local chatbot powered by Ollama. Start chatting below!")
-
-# Chat History Management
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -74,14 +63,25 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat Input and Response Generation
-if prompt := st.chat_input("What would you like to ask?"):
+if prompt := st.chat_input("Ask me anything!"):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        response_stream = llm.stream(prompt)
-        full_response = st.write_stream(response_stream)
+        with st.spinner("Thinking..."):
+            llm_endpoint = HuggingFaceEndpoint(
+                repo_id=model_id,
+                huggingface_api_token=HUGGINGFACE_TOKEN,
+                temperature=temperature,
+                top_p=top_p,
+                max_new_tokens=max_tokens
+            )
+            llm = ChatHuggingFace(llm=llm_endpoint)
+            
+            response = llm.invoke(prompt)
+            response_content = response.content
+            
+            st.markdown(response_content)
     
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    st.session_state.messages.append({"role": "assistant", "content": response_content})
